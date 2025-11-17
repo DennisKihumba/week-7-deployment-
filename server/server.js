@@ -8,14 +8,16 @@ import { Server } from "socket.io";
 import cors from "cors";
 import mongoose from "mongoose";
 import path from "path";
+import { fileURLToPath } from "url";
+
+// Fix __dirname in ES modules
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // -------------------- MongoDB Setup --------------------
-mongoose.connect(process.env.MONGO_URI, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-})
-.then(() => console.log("MongoDB connected"))
-.catch(err => console.log("MongoDB connection error:", err));
+mongoose.connect(process.env.MONGO_URI)
+  .then(() => console.log("MongoDB connected"))
+  .catch(err => console.log("MongoDB connection error:", err));
 
 // Message schema & model
 const messageSchema = new mongoose.Schema({
@@ -31,18 +33,32 @@ const Message = mongoose.model("Message", messageSchema);
 // -------------------- App & Socket Setup --------------------
 const app = express();
 const server = http.createServer(app);
+
+// IMPORTANT: Allow both HTTPS (Vercel) + WebSocket for Render
 const io = new Server(server, {
   cors: {
-    origin: process.env.CLIENT_URL || "http://localhost:5173",
+    origin: [
+      process.env.CLIENT_URL, 
+      "http://localhost:5173",
+      "https://websocket-puce-three.vercel.app"
+    ],
     methods: ["GET", "POST"],
     credentials: true,
   },
 });
 
 // -------------------- Middleware --------------------
-app.use(cors());
+app.use(cors({
+  origin: [
+    process.env.CLIENT_URL,
+    "http://localhost:5173",
+    "https://websocket-puce-three.vercel.app"
+  ],
+  credentials: true
+}));
+
 app.use(express.json());
-app.use(express.static(path.join(path.resolve(), "public")));
+app.use(express.static(path.join(__dirname, "public")));
 
 // -------------------- Store users --------------------
 const users = {};
@@ -62,29 +78,28 @@ io.on("connection", (socket) => {
     const allMessages = await Message.find().sort({ timestamp: 1 });
     socket.emit("previous_messages", allMessages);
 
-    // Broadcast user list and joined info
+    // Notify users
     io.emit("user_list", Object.values(users));
     io.emit("user_joined", { username, id: socket.id });
     console.log(`${username} joined the chat`);
   });
 
-  // Send message
+  // Public message
   socket.on("send_message", async (data) => {
     const username = users[socket.id]?.username;
-    if (!username) return; // enforce login
+    if (!username) return;
 
     const message = new Message({
       user: username,
       text: data.text,
-      isPrivate: data.isPrivate || false,
-      to: data.to || null,
+      isPrivate: false,
     });
 
     await message.save();
     io.emit("receive_message", message);
   });
 
-  // Typing indicator
+  // Typing
   socket.on("typing", (isTyping) => {
     const username = users[socket.id]?.username;
     if (!username) return;
@@ -95,7 +110,7 @@ io.on("connection", (socket) => {
     io.emit("typing_users", Object.values(typingUsers));
   });
 
-  // Private message
+  // Private messages
   socket.on("private_message", async ({ to, text }) => {
     const username = users[socket.id]?.username;
     if (!username) return;
@@ -116,6 +131,7 @@ io.on("connection", (socket) => {
   // Disconnect
   socket.on("disconnect", () => {
     const username = users[socket.id]?.username;
+
     if (username) {
       console.log(`${username} left`);
       io.emit("user_left", { username, id: socket.id });
@@ -123,6 +139,7 @@ io.on("connection", (socket) => {
 
     delete users[socket.id];
     delete typingUsers[socket.id];
+
     io.emit("user_list", Object.values(users));
     io.emit("typing_users", Object.values(typingUsers));
   });
@@ -138,9 +155,9 @@ app.get("/api/users", (req, res) => {
   res.json(Object.values(users));
 });
 
-// -------------------- Root --------------------
+// Health route for Render uptime
 app.get("/", (req, res) => {
-  res.send("Socket.io Chat Server running");
+  res.send("Server is running ✔️");
 });
 
 // -------------------- Start Server --------------------
